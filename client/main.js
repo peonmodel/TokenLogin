@@ -3,6 +3,16 @@ import { ReactiveVar } from 'meteor/reactive-var';
 
 import './main.html';
 
+/* global _TwoFactorLogin: true */
+
+import { Meteor } from 'meteor/meteor';
+
+import { TwoFactorLogin } from 'meteor/freelancecourtyard:tokenlogin';
+
+if (Meteor.isDevelopment) {
+  _TwoFactorLogin = TwoFactorLogin;
+}
+
 Template.hello.onCreated(function helloOnCreated() {
   // counter starts at 0
   this.counter = new ReactiveVar(0);
