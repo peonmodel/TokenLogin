@@ -18,11 +18,10 @@ class TokenLogin {
    *
    * @param  {string} identifier      a unique identifier for this instance
    */
-  constructor(identifier, {profile} = {}){
+  constructor(identifier){
     check(identifier, String);
     this.identifier = identifier;
     this.prefix = `TokenLogin:${this.identifier}`;
-    this.config = {profile};
   }
 
   /**
@@ -42,39 +41,38 @@ class TokenLogin {
       callback(err,res);
     });
   }
+
   /**
    * getLoginToken - get Meteor login service token
    *
    * @param  {string} selector username or email of user logging in
    * @param  {string} password password of user logging in
-   * @param  {string} sessionId session id of TokenAffirm session
    * @param  {string} token     token sent to factor
    * @param  {function} callback  function to call when server returns result
    */
-  getLoginToken(selector, password, sessionId, token, callback){
+  getLoginToken(selector, password, token, callback){
     check(selector, String);
     check(password, String);
-    check(sessionId, String);
     check(token, String);
     check(callback, Function);
     let digest = Accounts._hashPassword(password).digest;
-    Meteor.call(`${this.prefix}/getLoginToken`, selector, digest, sessionId, token, callback);
+    Meteor.call(`${this.prefix}/getLoginToken`, selector, digest, token, callback);
   }
-
-
 
   /**
    * login - log in directly after getting Meteor service login token
    *
    * @param  {string} selector username or email of user logging in
    * @param  {string} password password of user logging in
-   * @param  {string} sessionId session id of TokenAffirm session
    * @param  {string} token     token sent to factor
    * @param  {type} callback = ()=>{}  optional function to call if login returns
    */
-  login(selector, password, sessionId, token, callback = ()=>{}){
+  login(selector, password, token, callback = ()=>{}){
+    check(selector, String);
+    check(password, String);
+    check(token, String);
     check(callback, Function);
-    this.getLoginToken(selector, password, sessionId, token, (err, res)=>{
+    this.getLoginToken(selector, password, token, (err, res)=>{
       if (res) {Accounts.loginWithToken(res, (loginErr)=>{
         Accounts._setLoggingIn(false);
         if (loginErr) {callback(loginErr);}
@@ -91,13 +89,11 @@ class TokenLogin {
   /**
    * invalidateSession - invalidates a session, set LoggingIn to be false
    *
-   * @param  {string} sessionId id of session to invalidate
    * @param  {function} callback = ()=>{}  optional function to call when server returns result
    */
-  invalidateSession(sessionId, callback = ()=>{}){
-    check(sessionId, String);
+  invalidateSession(callback = ()=>{}){
     check(callback, Function);
-    Meteor.call(`${this.prefix}/invalidateSession`, sessionId, (err, res)=>{
+    Meteor.call(`${this.prefix}/invalidateSession`, (err, res)=>{
       Accounts._setLoggingIn(false);
       callback(err, res);
     });
@@ -124,16 +120,14 @@ class TokenLogin {
    *
    * @param  {string} selector username or email of user logging in
    * @param  {string} password password of user logging in
-   * @param  {string} sessionId id of session to check
    * @param  {function} callback = ()=>{}  optional function to call when server returns result
    */
-  assertOpenSession(selector, password, sessionId, callback = ()=>{}){
+  assertOpenSession(selector, password, callback = ()=>{}){
     check(selector, String);
     check(password, String);
-    check(sessionId, String);
     check(callback, Function);
     let digest = Accounts._hashPassword(password).digest;
-    Meteor.call(`${this.prefix}/assertOpenSession`, selector, digest, sessionId, callback);
+    Meteor.call(`${this.prefix}/assertOpenSession`, selector, digest, callback);
   }
 
 }

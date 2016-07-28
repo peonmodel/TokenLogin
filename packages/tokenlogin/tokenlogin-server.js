@@ -13,14 +13,20 @@ export { TwoFactorLogin };
 let defaultConfig = {
   factors: {
     default: {
-      send: (contact, token, factor = 'unknown')=>{console.log(`${factor} token: ${token} sent to ${contact}`);},
+      send: (contact, token, factor, settings, callback)=>{
+        console.log(`${factor} token: ${token} sent to ${contact} with ${settings}`);
+        callback(undefined, 'send success');
+      },
       // receive: () => {console.log(`receive function unsupported`);},
-      settings: null,
+      settings: {
+        timeout: 5000,  // how long to wait for send server reply before timeout
+      },
     },
   },
   generate: ()=>Random.id(6),
   validate: ()=>true,
   settings: null,
+  timeout: 1000,
   expiry: 5*(60*1000),  // in milliseconds
   retain: 7*24*60*(60*1000),  // 1 week
   requestInterval: 10*1000,  // 10 seconds
@@ -45,7 +51,6 @@ function validateSelector(selector){
   }
   return selector;
 }
-
 
 /**
  * findUser - find user with password
@@ -170,7 +175,8 @@ class TokenLogin {
         if (!instance.config.factors[factor]){
           throw new Meteor.Error(`${factor} not supported`);
         }
-        return instance.requestToken(user, contact, factor);
+        instance.invalidateSession(this.connection.id);
+        return instance.requestToken(this.connection.id, user, contact, factor);
       },
       /**
        * getLoginToken - get Meteor login service token
@@ -178,17 +184,15 @@ class TokenLogin {
        * @param {string} selector username or email of user logging in
        * @param {string} digest password hash of user logging in
        * @throws {Meteor.Error} when user is not found
-       * @param  {string} sessionId session id of TokenAffirm session
        * @param  {string} token     token sent to factor
        * @returns {boolean}           true when session is verified
        */
-      [`${prefix}/getLoginToken`]:function getLoginToken(selector, digest, sessionId, token){
+      [`${prefix}/getLoginToken`]:function getLoginToken(selector, digest, token){
         check(selector, String);
         check(digest, String);
-        check(sessionId, String);
         check(token, String);
         let user = findUser(selector, digest);
-        if (instance.verifyToken(user, sessionId, token)) {
+        if (instance.verifyToken(this.connection.id, user, token)) {
           return instance.saveMeteorServiceToken(user);
         } else {
           // wrong token
@@ -199,12 +203,10 @@ class TokenLogin {
       /**
        * invalidateSession - allow client-side to cancel a verification session
        *
-       * @param  {string} sessionId session id of TokenAffirm session
        * @returns {number}           1 when session is removed, 0 otherwise
        */
-      [`${prefix}/invalidateSession`]:function invalidateSession(sessionId){
-        check(sessionId, String);
-        return instance.invalidateSession(sessionId);
+      [`${prefix}/invalidateSession`]:function invalidateSession(){
+        return instance.invalidateSession(this.connection.id);
       },
       /**
        * verifyContact - return contact details of active user where token would be sent to
@@ -227,15 +229,13 @@ class TokenLogin {
        * @param {string} selector username or email of user logging in
        * @param {string} digest password hash of user logging in
        * @throws {Meteor.Error} when user not found
-       * @param {string} sessionId id of session to check
        * @returns {boolean }  true if session exist and awaiting token
        */
-      [`${prefix}/assertOpenSession`]:function assertOpenSession(selector, digest, sessionId){
+      [`${prefix}/assertOpenSession`]:function assertOpenSession(selector, digest){
         check(selector, String);
         check(digest, String);
-        check(sessionId, String);
         let user = findUser(selector, digest);
-        return instance.assertOpenSession(user, sessionId);
+        return instance.assertOpenSession(user, this.connection.id);
       },
     });
 
@@ -282,11 +282,11 @@ class TokenLogin {
    * useful for checking if need to regenerate token
    *
    * @param {object} user Meteor.user()
-   * @param {string} sessionId id of session to check
+   * @param {string} connectionId id of session to check
    * @returns {boolean }  true if session exist and awaiting token
    */
-  assertOpenSession(user, sessionId){
-    let session = this.collection.findOne({_id: sessionId, user: user._id});
+  assertOpenSession(user, connectionId){
+    let session = this.collection.findOne({connectionId: connectionId, userId: user._id});
     if (!session) {return false;}
     if (!!session.verifyAt) {return false;}  // session is closed
     if ((new Date() - new Date(session.expireAt)) > 0) {return false;}
@@ -294,30 +294,44 @@ class TokenLogin {
   }
 
   /**
-   * sendToken - sends token via the factor user defined
+   * sendToken - sends token via the factor user-defined
+   * as the user-defined send function may be asynchronous, so is this
    *
    * @param  {string} contact address to send token to
    * @param  {string} token   token used for verification
    * @param  {string} factor  name of factor to sent token via
-   * @returns {*}         return value of user-defined sending function
+   * @param {function} callback function to pass to async send method
    */
-  sendToken(contact, token, factor){
+  sendToken(contact, token, factor, callback){
     let method = this.config.factors[factor];
     if (!method) {
       console.error(`error, ${factor} not supported`);
       console.log(`printing token on console, ${token}`);
     }
-    return method.send(contact, token, factor);
+
+    // timeout condition in case user-defined function does not call callback
+    let timeout = get(method, 'settings.timeout') || this.config.timeout;
+    Meteor.setTimeout(()=>{
+      callback(new Meteor.Error(`sending token to ${contact} via ${factor} timed out`), undefined);
+    }, timeout);
+
+    method.send(contact, token, factor, method.settings, (err, res)=>{
+      if (err) {
+        if (err instanceof Meteor.Error) {callback(err);}
+        else {callback(new Meteor.Error(err));}
+      }
+      else {callback(undefined, res);}
+    });
   }
 
   /**
-   * invalidateSession - invalidates a confirmation session
+   * invalidateSession - invalidates a confirmation session that is still open
    *
-   * @param  {string} sessionId id of session to invalidate
+   * @param  {string} connectionId id of session to invalidate
    * @returns {number}           1 if session is successfully invalidated
    */
-  invalidateSession(sessionId){
-    return this.collection.remove({_id: sessionId});
+  invalidateSession(connectionId){
+    return this.collection.remove({connectionId: connectionId, verifyAt: {$exists: false}});
   }
 
   /**
@@ -331,28 +345,40 @@ class TokenLogin {
   }
 
   /**
-   * requestToken - request a token to login user
+   * requestToken - gets wrapAsync version of requestTokenAsync, behaves synchronously
    *
-   * @param  {object} user Meteor.user()
-   * @param  {string} contactAddress essential contact address, i.e. phone number or email address
-   * @param  {string} contactMethod  name of factor, i.e. 'telegram', 'SMS' or 'email'
-   * @returns {string}                id of session created
+   * @returns {function}  wrapAsync-ed function
    */
-  requestToken(user, contactAddress, contactMethod){
+  get requestToken(){
+    return Meteor.wrapAsync(this.requestTokenAsync);
+  }
+
+  /**
+   * requestTokenAsync - request a token to login user, is asynchronous
+   *
+   * @param {string} connectionId id used for subsequent queries
+   * @param  {string} contact essential contact address, i.e. phone number or email address
+   * @param  {string} factor  name of factor, i.e. 'telegram', 'SMS' or 'email'
+   * @param {function} callback function to pass to async send method
+   */
+  requestTokenAsync(connectionId, user, contact, factor, callback){
     let token = this.generateToken();
-    let sessionId = this.createSession(user, token, contactMethod);
-    this.sendToken(contactAddress, token, contactMethod);
-    return sessionId;
+    this.createSession(connectionId, user, token, factor);
+
+    this.sendToken(contact, token, factor, (err/*, res*/)=>{
+      if (err) {callback(err);}
+      else {callback(undefined, true);}
+    });
   }
 
   /**
      * isVerified - check if session is verified
      *
-     * @param  {string} sessionId id of session to check
+     * @param  {string} connectionId id of session to check
      * @returns {boolean}           true when session is verified
      */
-  isVerified(sessionId){
-    let session = this.collection.findOne({_id: sessionId});
+  isVerified(connectionId){
+    let session = this.collection.findOne({connectionId});
     return !!get(session, 'verifyAt');
   }
 
@@ -360,17 +386,17 @@ class TokenLogin {
    * verifyToken - verify a token - session
    *
    * @param  {object} user Meteor.user()
-   * @param  {string} sessionId id of session to verify
+   * @param  {string} connectionId id of session to verify
    * @param  {string} token     token used to verify session
    * @returns {boolean}           true when session is verified
    */
-  verifyToken(user, sessionId, token){
-    let session = this.collection.findOne({_id: sessionId, user: user._id});
+  verifyToken(user, connectionId, token){
+    let session = this.collection.findOne({connectionId: connectionId, userId: user._id});
     if (!session){console.log('no session'); return false;}
     if (!!session.verifyAt){console.log('already verified'); return false;}
     if ((new Date() - new Date(session.expireAt)) > 0) {console.log('expired'); return false;}
     if (session.token !== token) {console.log('wrong token'); return false;}
-    this.collection.update(sessionId, {
+    this.collection.update(session._id, {
       $set: {verifyAt: new Date()},
       $unset: {expireAt: true},
     });
@@ -380,17 +406,19 @@ class TokenLogin {
   /**
    * createSession - creates a verification session
    *
+   * @param {string} connectionId id used for subsequent queries
    * @param  {object} user Meteor.user()
    * @param  {string} token  unique string for verification
    * @param  {string} factor name of method token should be sent via
    * @returns {string}        id of session created
    */
-  createSession(user, token, factor){
+  createSession(connectionId, user, token, factor){
     return this.collection.insert({
       token,
       factor,
       expireAt: new Date((new Date()).getTime() + this.config.expiry),
-      user: user._id,
+      userId: user._id,
+      connectionId
     });
   }
 
@@ -448,8 +476,18 @@ function get (obj, ...params) {
 
 TwoFactorLogin = new TokenLogin('LoginSession', {
   factors: {
-    telegram: {send: (contact, token, factor = 'unknown')=>{console.log(`${factor} token: ${token} sent to ${contact}`);}},
-    email: {send: (contact, token, factor = 'unknown')=>{console.log(`${factor} token: ${token} sent to ${contact}`);}},
+    telegram: {
+      send: (contact, token, factor, settings, callback)=>{
+        console.log(`${factor} token: ${token} sent to ${contact} with ${settings}`);
+        callback(undefined, 'send success');
+      }
+    },
+    email: {
+      send: (contact, token, factor, settings, callback)=>{
+        console.log(`${factor} token: ${token} sent to ${contact} with ${settings}`);
+        callback(undefined, 'send success');
+      }
+    },
   },
   generate: ()=>Random.id(6),
   profile: 'TwoFactorLogin',
